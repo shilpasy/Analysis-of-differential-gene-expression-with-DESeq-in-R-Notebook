@@ -1,0 +1,285 @@
+---
+title: "Analysis of differential gene expression with DESeq in R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(DESeq2)
+library(RColorBrewer)
+library(pheatmap)
+library(tidyverse)
+library(airway)
+```
+
+We will be using aiway package for sample data. It has data from a RNA-seq experiment wherein airway smooth muscle cells were treated with dexamethasone (Himes et al. 2014). Glucocorticoids is the main ingredient of dexamethasone and is used mainly by people with asthma to reduce inflammation of the airways. 
+For each of the four cell lines, we have a treated and an untreated sample. For more description of the experiment see the PubMed entry 24926665 and for raw data see the GEO entry GSE52778.
+
+```{r}
+setwd("D:/shilpa/RNAseq/datacamp")
+data(airway)
+sample_meta <- as.data.frame(colData(airway))
+sample_meta <- sample_meta[,c(2,3)]
+sample_meta$dex <- gsub('trt', 'treated', sample_meta$dex)
+sample_meta$dex <- gsub('untrt', 'untreated', sample_meta$dex)
+names(sample_meta) <- c('cellLine', 'dexamethasone')
+write.table(sample_meta, file = "sample_meta.csv", sep = ',', col.names = T, row.names = T, quote = F)
+
+counts_data <- assay(airway)
+write.table(counts_data, file = 'counts_data.csv', sep = ',', col.names = T, row.names = T, quote = F)
+```
+
+The overall Design of the experiment is as follows: mRNA profiles obtained via RNA-Seq for four primary human airway smooth muscle cell lines that were treated with dexamethasone or were left untreated. 
+The counts data comes from RNAseq experiments which are preprocessed for QC steps, mapping and the final alignment is used to make the count matrix).
+
+```{r}
+raw_count_matrix <-read.csv('counts_data.csv')
+meta_data <- read.csv('sample_meta.csv')
+```
+
+We shall study expression of the airway muscle genes here, let's see how our data looks like!
+
+```{r}
+head(raw_count_matrix)
+```
+```{r}
+str(raw_count_matrix)
+
+```
+While there are many packages for DE analysis, we are going to use DESeq2. It has one of more popular ones and its vignette is very helpful.
+DESeq2 models the gene expression (count matrix data) by "negetive binomial distribution".
+
+What is a count matrix: 
+- Count matrix represents number of reads matching the exons of each gene. Barcodes (for each cell) and UMI (for each gene) information is used to generate this matrix.
+- The negative binomial model is commonly used to model RNA-seq counts data
+- Highest frequency near zero i.e. many genes have low number of counts
+- The expression range is between zero to inf (no max limit)
+- For discrete numbers i.e. counts, one could also use poisson but there is too much variation in the data than poisson can handle hence neg bino is used 
+
+NOTE: DESeq2 model internally corrects for the library size so transformed or normalized values such as counts scaled by library size should not be used as input.
+
+we shall now construct the DESeqDataSet object!
+
+```{r}
+#check if the rownames in metadata match with the columns names from counts_matrix and if they are in the same ORDER
+all(colnames(raw_count_matrix) %in% rownames(meta_data))
+all(colnames(raw_count_matrix) == rownames(meta_data))
+
+#this is True in our case so we can use this metadata for the DESeqDataSet object 
+
+dds <- DESeqDataSetFromMatrix(countData = raw_count_matrix,
+                                colData = meta_data,
+                                design = ~ dexamethasone)
+
+# design formula is used to estimate the dispersions and to estimate the log2 fold changes of the model
+
+dds
+
+##In case they were not matching, use the following to get matched indexes and then rearrange the metadata
+##Use the match() function to reorder the counts matrix
+##reorder_idx <- match(rownames(metadata), colnames(raw_count_matrix))
+##Reorder the columns of the count data
+##reordered_raw_count_matrix <- raw_count_matrix[ , reorder_idx]
+```
+There are 4 ways of constructing DESeqDataSet depending on which pipeline is used upstream. We have count matrix here so we use 'countData' while constructing dds.
+
+```{r}
+# pre-filtering: removing rows with low gene counts ; keeping rows that have at least 10 reads total. This reduces the number from around 60,000 to 20,000
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+#We want the differential expression analysis as compared with "untreated"
+dds$dexamethasone <- relevel(dds$dexamethasone, ref = "untreated")
+
+```
+
+Now we can explore the data with DESeq2 functions and perform the differential expression analysis.
+--------------------------------------------------------------------------------------------------------
+NORMALIZING COUNTS WITH DESeq2
+-> normalized for library size while accounting for library composition (library size is the total number of gene counts per sample)
+
+```{r}
+dds <- estimateSizeFactors(dds)
+normalized_counts <- counts(dds, normalized=TRUE)
+
+```
+
+estimateSizeFactors: During this step two technical variations are taken into account.
+library size (sequencing depth) & library composition (need to normalise the counts based on size factor- default calculation is based on median of ratios method).
+(One needs to correct for gene length bias also in case we are comparing different genes. But here we are comparing against condition and not genes.)
+
+We will be using the normalized counts to explore similarities in gene expression between each of our samples. To do this we use clustering after using dimensional reduction. 
+
+```{r}
+vsd_trans <- vst(dds, blind = TRUE)
+vsd_trans
+```
+
+Before clustering, we need to log transform the normalized counts to improve the visualization of the clustering and hence our understanding. we can use DESeq2's vst() function for this. vst stands for Variance stabilizing transformation. The transformed data should be approximated variance stabilized and also includes correction for size factors or normalization factors. The transformed data is on the log2 scale for large counts.
+The blind=TRUE argument specifies that the transformation should be blind to the sample information given in the design formula; this argument should be specified when performing quality assessment.
+
+From vsd, we need to extract the VST-trasformed normalized counts as a matrix.
+
+```{r}
+vsd_mat <- assay(vsd_trans)
+```
+Then, we need to compute the pairwise correlation values between each pair of samples
+```{r}
+vsd_cor <- cor(vsd_mat)
+
+```
+Now we do Hierarchical clustering
+```{r}
+pheatmap(vsd_cor, annotation = select(meta_data, dexamethasone)) 
+
+```
+
+This heatmap shows us that the treated and untreated cluster together (but not very well!).
+Hopefully our differentially expressed genes are driving this separation.
+
+We will crosscheck this with PCA (QC step 2)
+
+```{r}
+plotPCA(vsd_trans, intgroup="dexamethasone")
+
+```
+
+Even though PC1 is able to separate the treated and untreated, the variance covered by PC1 is only 41%
+
+Now that we have explored the quality of the samples, checked for outliers, we can go ahead and find which genes have significant differences in expression between the treated and untreated samples.
+ 
+At this stage we do not need to re-create the object since we have not removed samples or found additional sources of variation during QC steps.
+
+Run DESeq
+-----------------------------------------------------------------------------------------------------------------
+
+```{r}
+dds <- DESeq(dds)
+dds
+```
+
+We can see the steps executed by DESeq2:
+
+-  Estimating size factors for each gene (we had already done that so here it is using those pre-calculated)
+-  Estimate dispersions for each gene
+-  Fitting the linear model for each gene
+ - Hypothesis testing
+ 
+NOW WE SHOULD CHECK HOW WELL OUR DATA FITS TO DESEQ2 MODEL
+
+Dispersion estimates are used to model the raw counts; if the dispersions don't follow the assumptions made by DESeq2, then the variation in the data could be poorly estimated and our outout about which genes are differentially expressed could be wrong.
+To remind ourselves the assumptions made by DESeq2 are:
+- The counts data fit to the negative binomial distribution
+- The dispersions should generally decrease with increase in the mean
+
+```{r}
+plotDispEsts(dds)
+```
+About the dispersion plot: 
+The goal behind estimating dispersions is to account for variability between biological replicates. 
+To accurately model counts for each gene, we should also have accurate estimations of variability between replicates in the same group.
+(In another words, dispersion is how far the observed count will be from the mean value for a gene)
+
+X axis is mean normalized count per gene, y axis is dispersion per gene, plotted for all the cells. 
+Internally a function estimates dispersions for a given neg binomial distribution.
+We generally do not have those many biological replicates per gene, that's where this function comes in handy.
+
+It assumes that genes with similar expression levels will also have similar dispersion values. With this assumption:
+- Maximum likelihood estimation is used to get dispersion estimates for each gene.
+- Fit curve to gene-wise dispersion estimates
+- Shrink gene-wise dispersion estimates towards values predicted by the curve
+
+Variance = mean + dispersion*mean^2.
+(Dispersion of 0.01 means 10% variability between replicates)
+
+Plotting the dispersion estimates is a useful diagnostic. The dispersion plot which we see here is a typical one with the final estimates shrunk from the gene-wise estimates towards the fitted estimates. Some gene-wise estimates are flagged (open circles) as outliers and not shrunk towards the fitted value. (DESeq2 will assume that these outliers do not follow the modelling assumptions because they have additional variability which could not be accounted for by bio/tech replicates)
+
+From the dispersion plot we can see that fit of our data to the model is good.
+
+Dispersion plots can also be used to detect outlier genes in a particular cell. Outlier Genes with high dispersion in comparison to the mean might indicate biases in sequencing depth. However, some Housekeeping genes could have  high dispersion.
+
+To read more about this fitting please refer: https://rdrr.io/bioc/DESeq2/man/estimateDispersions.html
+
+To improve the fold change estimates for our data, we want to take our results and shrink the log2 fold changes. DESeq2 has the lfcShrink() function to generate the shrunken log2 foldchanges.
+
+```{r}
+res = results(dds)
+results_shrunk = lfcShrink(dds=dds, res=res, coef=2)
+```
+To improve the estimated fold changes we use log2 foldchange shrinkage. For genes with low amounts of information available, shrinkage uses information from all genes to generate more likely, lower, log2 fold change estimates, similar to what we did with dispersions.
+
+
+```{r}
+#res0.01 <- results(dds,alpha = 0.01)
+#To get descriptions for the columns in the results table, we can use the mcols()
+mcols(results_shrunk)
+
+```
+baseMean is the mean value across all samples , log2FoldChange are the shrunken log2 foldchanges, lfcSE is standard error of the fold change estimates, and pvalue is from the Wald statistics output from the Wald test for differential expression, and padj is adjusted p-value from Benjamini-Hochberg (BH) calculation.
+
+Multiple test correction is performed by DESeq2 using BH-method, to adjust p-values for multiple testing and control the proportion of false positives relative to true. 
+
+To reduce the number of genes tested, DESeq2 automatically filters out genes unlikely to be truly differentially expressed prior to testing, such as genes with zero counts across all samples, genes with low mean values across all samples, and genes with extreme count outliers. We can see the filtered genes in the results tables represented by an NA in the p-adjusted column.
+
+
+```{r}
+results_shrunk
+summary(results_shrunk)
+
+```
+
+IN the summary table we see that with the chosen parameters, we have around 8.4% gene upregulated (log2 fold change > 0) and 6.7% genes downregulated.
+
+VISUALIZING RESULTS
+-------------------------------------------------------------------
+
+
+```{r}
+# MA plot
+plotMA(res)
+abline(h=c(-1,1), col="red", lwd=2)
+```
+
+To explore our results, the MA plot can be helpful. The MA plot shows the mean of the normalized counts versus the log2 fold changes for all genes tested. Note the large log2 foldchanges, particularly for genes with lower mean count values. These fold changes are unlikely to be as accurate for genes that have little information associated with them, such as genes with low numbers of counts or high dispersion values.
+To improve the estimated fold changes we use log2 foldchange shrinkage. 
+
+```{r}
+plotMA(results_shrunk)
+abline(h=c(-1,1), col="red", lwd=2)
+```
+Compare the MA plot before and after the shrinkage and observe that in the shrunk ones we see more restricted log2 foldchange values, especially for lowly expressed genes. These shrunken log2 foldchanges should be more accurate; however, shrinking the log2 foldchanges will not affect the number of differentially expressed genes returned, only the log2 fold change values. 
+
+```{r}
+resB = results(dds, lfcThreshold=0.58, alpha = 0.01)
+results_shrunkB = lfcShrink(dds=dds, res=resB, coef=2)
+
+```
+
+If we wanted to return the genes most likely to be biologically relevant, we could also include a log2 fold change threshold. 
+
+Let's say we want a threshold of 1.5; log2(1.5) is 0.58, we add this to our results() function.
+While using any log2 fold change cut-off increases the risk of losing biologically relevant genes, by using a very small log2 foldchange threshold, we are hoping to reduce the risk that the genes more biologically meaningful.
+
+
+```{r}
+summary(results_shrunkB)
+
+```
+To know which genes are over and under expressing, we will explore annotables package to quickly obtain gene names for the Ensembl gene IDs.
+
+
+```{r}
+
+res_p0.05 <- data.frame(res) %>% mutate(threshold = padj < 0.05)
+
+# Create the volcano plot
+ggplot(res_p0.05) + 
+        geom_point(aes(x = log2FoldChange, y = -log10(padj), color = threshold)) + 
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") + 
+        theme(legend.position = "none", 
+              plot.title = element_text(size = rel(1.5), hjust = 0.5), 
+              axis.title = element_text(size = rel(1.25)))
+
+```
+
+
